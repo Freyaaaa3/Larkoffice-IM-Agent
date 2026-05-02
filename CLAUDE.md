@@ -39,15 +39,16 @@ cp .env.example .env
 # 2. 安装依赖
 pip install -e .
 
-# 3. lark-cli 认证
-lark-cli auth login --domain docs,slides,drive,im
+# 3. lark-cli 认证（应用/租户 + 可选用户 OAuth）
+lark-cli config init   # 若尚未配置应用
+lark-cli auth login --domain docs,slides,drive,im   # 可选；仅当 .env 中 LARK_CLI_IDENTITY=user 时需要
 
 # 4. 启动
 python -m agent.main
 ```
 
 ## 关键约定
-- 所有 lark-cli 操作默认 `--as user`
+- lark-cli 默认 `--as bot`（`LARK_CLI_IDENTITY`，无需用户 OAuth）；若以用户身份写「我的空间」文档则设 `user` 并完成 `auth login`
 - 文档创建使用 `--api-version v2`
 - 幻灯片 XML 必须符合 SML 2.0 协议，生成前必须读取 xml-schema-quick-ref.md
 - 渐变色必须用 rgba() 格式 + 百分比停靠点

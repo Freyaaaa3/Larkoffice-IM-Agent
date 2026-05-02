@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 from openai import OpenAI
 
 from agent.config import LLM_API_KEY, LLM_BASE_URL, LLM_MODEL
+from agent.flow import F
 
 logger = logging.getLogger(__name__)
 
@@ -108,6 +109,14 @@ class ContentStructurer:
 
         try:
             import asyncio
+
+            F(
+                "struct.llm",
+                "structure 请求",
+                model=self._model,
+                topic=(plan.topic or "")[:80],
+                user_msg_len=len(user_msg),
+            )
             response = await asyncio.to_thread(
                 self._client.chat.completions.create,
                 model=self._model,
@@ -122,13 +131,22 @@ class ContentStructurer:
                 content = content.split("```")[1].split("```")[0].strip()
 
             data = json.loads(content)
-            return StructuredContent(
+            sc = StructuredContent(
                 doc_content=data.get("doc_content", ""),
                 slides_outline=data.get("slides", []),
                 summary=data.get("summary", ""),
             )
+            F(
+                "struct.ok",
+                "structure 完成",
+                doc_len=len(sc.doc_content or ""),
+                outline_pages=len(sc.slides_outline or []),
+                summary_len=len(sc.summary or ""),
+            )
+            return sc
         except Exception:
             logger.exception("Failed to structure content")
+            F("struct.err", "structure 异常，返回占位", topic=(plan.topic or "")[:60])
             return StructuredContent(
                 doc_content=f"<title>{plan.topic}</title><p>内容生成失败，请重试。</p>",
                 summary=plan.topic,
@@ -140,6 +158,8 @@ class ContentStructurer:
 
         # Batch: generate 3 pages at a time to balance speed and token limits
         batch_size = 3
+        total = len(slides_outline)
+        F("slides_xml", "开始分批生成", total_pages=total, batch_size=batch_size, style=style[:40])
         for i in range(0, len(slides_outline), batch_size):
             batch = slides_outline[i:i + batch_size]
             batch_text = json.dumps(batch, ensure_ascii=False, indent=2)
@@ -157,6 +177,9 @@ class ContentStructurer:
 
             try:
                 import asyncio
+
+                hi = min(i + batch_size, total)
+                F("slides_xml", "批次 LLM", batch_from=i + 1, batch_to=hi, total=total)
                 response = await asyncio.to_thread(
                     self._client.chat.completions.create,
                     model=self._model,
@@ -180,8 +203,11 @@ class ContentStructurer:
                     batch_slides = [str(data)]
 
                 all_slides.extend(batch_slides)
+                F("slides_xml", "批次解析成功", added=len(batch_slides), cumulative=len(all_slides))
             except Exception:
                 logger.exception("Failed to generate slides XML batch %d-%d", i+1, i+batch_size)
+                F("slides_xml", "批次失败已跳过", from_page=i + 1, to_page=min(i + batch_size, total))
                 continue
 
+        F("slides_xml", "全部批次结束", slides=len(all_slides))
         return SlidesXML(slides=all_slides)

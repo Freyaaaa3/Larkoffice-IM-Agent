@@ -1,5 +1,9 @@
-"""Intent Planner: LLM-driven intent recognition, task decomposition, and parameter extraction."""
+"""Intent Planner: LLM-driven intent recognition, task decomposition, and parameter extraction.
 
+高层路由与门控请使用 `agent.IntentSystem`；本模块由 `PlanningLayer` 调用，作为闭环中的规划子能力。
+"""
+
+import asyncio
 import json
 import logging
 from dataclasses import dataclass, field
@@ -7,6 +11,7 @@ from dataclasses import dataclass, field
 from openai import OpenAI
 
 from agent.config import LLM_API_KEY, LLM_BASE_URL, LLM_MODEL
+from agent.flow import F
 
 logger = logging.getLogger(__name__)
 
@@ -107,6 +112,13 @@ class Planner:
         messages.append({"role": "user", "content": user_message})
 
         try:
+            F(
+                "planner.llm",
+                "chat.completions 请求",
+                model=self._model,
+                user_len=len(user_message or ""),
+                history_msgs=len(chat_history or []),
+            )
             response = await asyncio.to_thread(
                 self._client.chat.completions.create,
                 model=self._model,
@@ -122,7 +134,7 @@ class Planner:
                 content = content.split("```")[1].split("```")[0].strip()
 
             data = json.loads(content)
-            return Plan(
+            plan = Plan(
                 intent=data.get("intent", "query"),
                 topic=data.get("topic", ""),
                 audience=data.get("audience", ""),
@@ -132,13 +144,21 @@ class Planner:
                 source_context=data.get("source_context", ""),
                 subtasks=data.get("subtasks", []),
             )
+            F(
+                "planner.ok",
+                "解析 Plan 成功",
+                intent=plan.intent,
+                topic=(plan.topic or "")[:80],
+                pages=plan.estimated_pages,
+                subtasks=len(plan.subtasks or []),
+            )
+            return plan
         except (json.JSONDecodeError, KeyError, IndexError) as e:
             logger.error("Failed to parse planner response: %s", e)
+            F("planner.fallback", "解析失败，回落 query", error=str(e)[:100])
             return Plan(
                 intent="query",
                 topic=user_message[:50],
                 subtasks=[{"id": 1, "type": "query", "description": "直接回复用户问题"}],
             )
 
-
-import asyncio

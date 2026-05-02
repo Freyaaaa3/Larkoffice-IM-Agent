@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from agent.config import LARK_CLI_IDENTITY
+from agent.flow import F
 
 logger = logging.getLogger(__name__)
 
@@ -48,7 +49,9 @@ async def _run_lark_cli(*args: str, format_json: bool = False) -> ExecutionResul
     full_args = list(args)
     if format_json:
         full_args += ["--format", "json"]
-    logger.info("lark-cli %s", " ".join(full_args[:6]) + ("..." if len(full_args) > 6 else ""))
+    preview = " ".join(full_args[:8]) + (" …" if len(full_args) > 8 else "")
+    logger.info("lark-cli %s", preview)
+    F("exec.cli", "子进程启动", cmd_preview=preview[:200], argv_n=len(full_args))
 
     # Force UTF-8 output from lark-cli
     env = {**os.environ, "PYTHONIOENCODING": "utf-8", "LANG": "C.UTF-8"}
@@ -74,19 +77,24 @@ async def _run_lark_cli(*args: str, format_json: bool = False) -> ExecutionResul
                 if not data.get("ok", True):
                     msg = data.get("error", {}).get("message", err or "unknown")
                     logger.error("lark-cli API error: %s", msg)
+                    F("exec.cli", "结束 failure", rc=proc.returncode, api_err=msg[:120])
                     return ExecutionResult(success=False, error=msg)
             except json.JSONDecodeError:
                 pass
         logger.error("lark-cli failed (rc=%d): %s", proc.returncode, err or out[:200])
+        F("exec.cli", "结束 failure", rc=proc.returncode, stderr=(err or out)[:120])
         return ExecutionResult(success=False, error=err or out[:200])
 
     if not out:
+        F("exec.cli", "结束 success", rc=0, empty_stdout=True)
         return ExecutionResult(success=True, data={})
 
     try:
         data = json.loads(out)
+        F("exec.cli", "结束 success", rc=0, json_keys=list(data.keys())[:12] if isinstance(data, dict) else "list")
         return ExecutionResult(success=True, data=data)
     except json.JSONDecodeError:
+        F("exec.cli", "结束 success", rc=0, raw_stdout_len=len(out))
         return ExecutionResult(success=True, data={"raw": out})
 
 
@@ -101,13 +109,16 @@ class Executor:
 
     async def create_document(self, title: str, content: str, doc_format: str = "markdown") -> ExecutionResult:
         """Create a Feishu document. Content can be XML or Markdown."""
-        return await _run_lark_cli(
+        args: list[str] = [
             "docs", "+create",
             "--api-version", "v2",
             "--doc-format", doc_format,
-            "--content", content,
-            *_as_flag(),
-        )
+        ]
+        if (title or "").strip():
+            args.extend(["--title", (title or "").strip()[:500]])
+        args.extend(["--content", content])
+        args.extend(_as_flag())
+        return await _run_lark_cli(*args)
 
     async def update_document(self, doc_token: str, content: str, command: str = "append",
                               doc_format: str = "markdown") -> ExecutionResult:
