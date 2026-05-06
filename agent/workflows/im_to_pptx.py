@@ -137,8 +137,27 @@ class ImToPptxWorkflow:
     async def handle_card_action(
         self, action: str, chat_id: str, message_id: str
     ) -> None:
-        """Handle card button callback: directly execute without gate/confirmation."""
+        """Handle card button callback."""
         cid = short_id(chat_id)
+
+        # Handle confirmation card buttons
+        if action == "confirm_plan":
+            if chat_id not in _pending_plans:
+                F("workflow.card", "确认按钮但无待确认计划", chat_id=cid)
+                return
+            plan = _pending_plans.pop(chat_id)
+            self._group_gate.clear_buffer(chat_id)
+            F("workflow.card", "确认按钮→启动执行", chat_id=cid, intent=plan.intent, topic=plan.topic[:60])
+            await self.bot.send_text(chat_id, "好的，开始执行！")
+            asyncio.create_task(self._run_workflow(plan, chat_id))
+            return
+
+        if action == "cancel_plan":
+            _pending_plans.pop(chat_id, None)
+            self._group_gate.clear_buffer(chat_id)
+            F("workflow.card", "取消按钮", chat_id=cid)
+            await self.bot.send_text(chat_id, "已取消，有什么需要调整的吗？")
+            return
 
         # If there's a pending plan, clear it first
         if chat_id in _pending_plans:
@@ -373,7 +392,54 @@ class ImToPptxWorkflow:
 
         _pending_plans[chat_id] = plan
         F("workflow.outcome", "CONFIRM_PLAN 已写入待确认", chat_id=cid, intent=plan.intent, topic=plan.topic[:80])
-        await self.bot.send_text(chat_id, plan.to_confirmation_text())
+        await self._send_confirmation_card(chat_id, plan)
+
+    async def _send_confirmation_card(self, chat_id: str, plan: Plan) -> None:
+        """Send confirmation as an interactive card with confirm/cancel buttons."""
+        import json as _json
+        intent_label = "生成文档" if plan.intent == "generate_doc" else "生成PPT"
+        card = {
+            "config": {"wide_screen_mode": True},
+            "header": {
+                "title": {"tag": "plain_text", "content": "📋 任务计划"},
+                "template": "blue",
+            },
+            "elements": [
+                {
+                    "tag": "div",
+                    "text": {
+                        "tag": "lark_md",
+                        "content": (
+                            f"**📌 主题：**{plan.topic}\n"
+                            f"**👥 受众：**{plan.audience or '通用'}\n"
+                            f"**🎨 风格：**{plan.style}\n"
+                            f"**📄 预计页数：**{plan.estimated_pages}\n\n"
+                            + "**📝 核心要点：**\n"
+                            + "\n".join(f"  {i}. {pt}" for i, pt in enumerate(plan.key_points, 1))
+                        ),
+                    },
+                },
+                {"tag": "hr"},
+                {
+                    "tag": "action",
+                    "actions": [
+                        {
+                            "tag": "button",
+                            "text": {"tag": "plain_text", "content": f"✅ 确认{intent_label}"},
+                            "type": "primary",
+                            "value": {"action": "confirm_plan"},
+                        },
+                        {
+                            "tag": "button",
+                            "text": {"tag": "plain_text", "content": "❌ 取消"},
+                            "type": "danger",
+                            "value": {"action": "cancel_plan"},
+                        },
+                    ],
+                },
+            ],
+        }
+        await self.bot.send_card(chat_id, card)
 
     async def _run_workflow(self, plan: Plan, chat_id: str):
         """Execute the full workflow: plan → doc → slides → deliver."""
