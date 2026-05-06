@@ -6,6 +6,7 @@ import logging
 import os
 import shutil
 import sys
+import tempfile
 from dataclasses import dataclass
 from typing import Any
 
@@ -15,22 +16,51 @@ from agent.flow import F
 logger = logging.getLogger(__name__)
 
 
-def _find_lark_cli() -> str:
-    """Find lark-cli executable path (handles Windows .cmd wrappers)."""
+def _find_lark_cli() -> list[str]:
+    """Find lark-cli executable path, returning [node, run.js] on Windows
+    to bypass .cmd wrapper which misinterprets < > characters in arguments."""
+    if sys.platform == "win32":
+        node_exe = shutil.which("node")
+        npm_prefix = os.popen("npm prefix -g 2>nul").read().strip()
+        if node_exe and npm_prefix:
+            js_entry = os.path.join(npm_prefix, "node_modules", "@larksuite", "cli", "scripts", "run.js")
+            if os.path.isfile(js_entry):
+                return [node_exe, js_entry]
+    # Fallback: use lark-cli directly
     path = shutil.which("lark-cli")
     if path:
-        return path
-    # Windows: try .cmd in common npm global dirs
+        return [path]
     if sys.platform == "win32":
         npm_prefix = os.popen("npm prefix -g 2>nul").read().strip()
         if npm_prefix:
             cmd_path = os.path.join(npm_prefix, "lark-cli.cmd")
             if os.path.isfile(cmd_path):
-                return cmd_path
-    return "lark-cli"
+                return [cmd_path]
+    return ["lark-cli"]
 
 
-LARK_CLI_PATH = _find_lark_cli()
+LARK_CLI_CMD = _find_lark_cli()
+
+
+def _deep_find_str(obj: Any, keys: tuple[str, ...], depth: int = 0) -> str:
+    """Recursively search a dict/list for the first matching key with a non-empty string value."""
+    if depth > 12 or obj is None:
+        return ""
+    if isinstance(obj, dict):
+        for k in keys:
+            v = obj.get(k)
+            if isinstance(v, str) and v.strip():
+                return v.strip()
+        for v in obj.values():
+            r = _deep_find_str(v, keys, depth + 1)
+            if r:
+                return r
+    elif isinstance(obj, list):
+        for item in obj:
+            r = _deep_find_str(item, keys, depth + 1)
+            if r:
+                return r
+    return ""
 
 
 @dataclass
@@ -57,7 +87,7 @@ async def _run_lark_cli(*args: str, format_json: bool = False) -> ExecutionResul
     env = {**os.environ, "PYTHONIOENCODING": "utf-8", "LANG": "C.UTF-8"}
 
     proc = await asyncio.create_subprocess_exec(
-        LARK_CLI_PATH,
+        *LARK_CLI_CMD,
         *full_args,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
@@ -146,13 +176,86 @@ class Executor:
     # -- Slides operations (Scene D) --
 
     async def create_slides(self, title: str, slides_json: str) -> ExecutionResult:
-        """Create a presentation with pages. slides_json is a JSON array of slide XML strings."""
-        return await _run_lark_cli(
+        """Create a presentation with pages. slides_json is a JSON array of slide XML strings.
+
+        Strategy: split into small batches (≤3 slides) and use `slides +create --slides`
+        for the first batch, then `add_slide` for remaining pages. This avoids hitting
+        Windows command-line length limit while keeping the first batch on the reliable
+        `+create` code path.
+        """
+        try:
+            slides_list = json.loads(slides_json)
+        except json.JSONDecodeError:
+            return ExecutionResult(success=False, error="slides_json 解析失败")
+
+        if not slides_list:
+            # Empty: just create blank presentation
+            return await _run_lark_cli(
+                "slides", "+create",
+                "--title", title,
+                "--slides", "[]",
+                *_as_flag(),
+            )
+
+        # Split into batches to stay under Windows ~8191 char limit
+        # First batch: try up to 3 slides via +create --slides
+        BATCH_SIZE = 3
+        first_batch = slides_list[:BATCH_SIZE]
+        remaining = slides_list[BATCH_SIZE:]
+
+        first_json = json.dumps(first_batch, ensure_ascii=False)
+        F("exec.cli", "分批创建：首批", batch=len(first_batch), remaining=len(remaining), json_len=len(first_json))
+
+        first_result = await _run_lark_cli(
             "slides", "+create",
             "--title", title,
-            "--slides", slides_json,
+            "--slides", first_json,
             *_as_flag(),
         )
+
+        if not first_result.success:
+            # If first batch is too large, try single slide
+            if len(first_batch) > 1:
+                F("exec.cli", "首批失败，尝试单页创建")
+                single_json = json.dumps([slides_list[0]], ensure_ascii=False)
+                first_result = await _run_lark_cli(
+                    "slides", "+create",
+                    "--title", title,
+                    "--slides", single_json,
+                    *_as_flag(),
+                )
+                if first_result.success:
+                    remaining = slides_list[1:]
+                # else: fall through, report error
+            if not first_result.success:
+                return first_result
+
+        if not remaining:
+            return first_result
+
+        # Add remaining slides one by one via xml_presentation.slide.create
+        presentation_id = _deep_find_str(first_result.data, ("xml_presentation_id", "presentation_id"))
+        if not presentation_id:
+            return ExecutionResult(success=False, error="创建演示文稿成功但未返回 presentation_id")
+
+        added_ok = 0
+        for i, slide_xml in enumerate(remaining):
+            add_result = await self.add_slide(presentation_id, slide_xml)
+            if add_result.success:
+                added_ok += 1
+            else:
+                logger.warning("添加第 %d 页幻灯片失败: %s", BATCH_SIZE + i + 1, add_result.error)
+
+        # If ALL remaining slides failed, report partial success
+        if added_ok == 0 and len(remaining) > 0:
+            logger.error("所有后续幻灯片添加失败")
+            return ExecutionResult(
+                success=False,
+                error=f"演示文稿已创建（含首批{len(first_batch)}页），但后续{len(remaining)}页全部添加失败",
+                data=first_result.data,
+            )
+
+        return first_result
 
     async def get_slides(self, presentation_id: str) -> ExecutionResult:
         """Read full presentation XML."""
@@ -170,6 +273,7 @@ class Executor:
             "--presentation", presentation_id,
             "--slide-id", slide_id,
             "--parts", parts_json,
+            "--yes",
             *_as_flag(),
         )
 
@@ -183,6 +287,7 @@ class Executor:
             "slides", "xml_presentation.slide", "create",
             "--params", json.dumps({"xml_presentation_id": presentation_id}),
             "--data", json.dumps(data),
+            "--yes",
             *_as_flag(),
             format_json=True,
         )
@@ -234,6 +339,23 @@ class Executor:
             "--token", file_token,
             "--type", file_type,
             "--format", format,
+        )
+
+    # -- Drive permission operations --
+
+    async def set_public_sharing(self, token: str, doc_type: str = "slides") -> ExecutionResult:
+        """Set anyone-with-link-can-view permission for a document."""
+        return await _run_lark_cli(
+            "api", "PATCH", f"/open-apis/drive/v1/permissions/{token}/public",
+            "--params", json.dumps({"type": doc_type}),
+            "--data", json.dumps({
+                "external_access_entity": "open",
+                "security_entity": "anyone_can_view",
+                "comment_entity": "anyone_can_view",
+                "share_entity": "anyone",
+                "link_share_entity": "anyone_readable",
+            }),
+            "--as", "bot",
         )
 
     # -- Whiteboard operations (Scene C optional) --

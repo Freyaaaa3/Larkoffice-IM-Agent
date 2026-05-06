@@ -11,6 +11,38 @@ from agent.flow import F
 
 logger = logging.getLogger(__name__)
 
+
+def _validate_slide_xml(xml: str) -> bool:
+    """Basic validation that slide XML conforms to SML 2.0 structure rules."""
+    if not xml or "<slide" not in xml:
+        return False
+    # Must have xmlns
+    if 'xmlns="http://www.larkoffice.com/sml/2.0"' not in xml:
+        return False
+    # Must have <data> element
+    if "<data>" not in xml:
+        return False
+    # Must have closing </slide>
+    if "</slide>" not in xml:
+        return False
+    # No direct <title> or <body> under <slide> (must be inside <content>)
+    # Simple check: <slide> should not be immediately followed by <title> or <body>
+    import re
+    if re.search(r"<slide[^>]*>\s*<(title|body)[>\s]", xml):
+        return False
+    return True
+
+
+def _fix_slide_xml(xml: str) -> str:
+    """Attempt to fix common XML issues."""
+    import re
+    # Add xmlns if missing
+    if 'xmlns=' not in xml:
+        xml = xml.replace("<slide", '<slide xmlns="http://www.larkoffice.com/sml/2.0"', 1)
+    # Remove http(s) image URLs (they won't render)
+    xml = re.sub(r'<img[^>]*src="https?://[^"]*"[^>]*/>', '', xml)
+    return xml
+
 STRUCTURE_SYSTEM_PROMPT = """你是内容结构化专家。将用户提供的自由文本/讨论内容转化为结构化的文档和幻灯片内容。
 
 ## 文档内容格式
@@ -38,33 +70,102 @@ STRUCTURE_SYSTEM_PROMPT = """你是内容结构化专家。将用户提供的自
 }"""
 
 
-SLIDES_XML_SYSTEM_PROMPT = """你是飞书幻灯片 XML 生成专家。根据幻灯片大纲生成符合飞书 SML 2.0 协议的 XML。
+SLIDES_XML_SYSTEM_PROMPT = """你是飞书幻灯片 XML 生成专家。根据幻灯片大纲生成严格符合飞书 SML 2.0 协议的 XML。
 
-## 核心规则
-1. 命名空间：<slide xmlns="http://www.larkoffice.com/sml/2.0">
-2. 画布尺寸：960×540
-3. 直接子元素只有 <style>、<data>、<note>
-4. 文本通过 <content><p>...</p></content> 表达
-5. 每页 slide 需要完整 XML：背景、文本、图形、配色
-6. 渐变必须用 rgba() 格式 + 百分比停靠点
+## 严格规则（违反会导致 API 报错，必须遵守）
 
-## 风格配置
-- 商务汇报：背景浅灰 rgb(248,250,252)，主色深蓝 rgb(30,60,114)，文字深灰 rgb(30,41,59)
-- 科技产品：背景深蓝渐变 linear-gradient(135deg,rgba(15,23,42,1) 0%,rgba(56,97,140,1) 100%)，主色蓝 rgb(59,130,246)，文字白色
-- 教育培训：背景白色 rgb(255,255,255)，主色绿 rgb(34,197,94)，文字深灰 rgb(51,65,85)
-- 创意设计：背景紫粉渐变 linear-gradient(135deg,rgba(88,28,135,1) 0%,rgba(190,24,93,1) 100%)，主色粉紫，文字白色
-- 简约专业：背景浅灰 rgb(248,250,252) + 顶部彩色渐变条，主色蓝 rgb(59,130,246)，文字深色 rgb(15,23,42)
+1. 每页 slide 必须带命名空间：`<slide xmlns="http://www.larkoffice.com/sml/2.0">`
+2. `<slide>` 直接子元素只有三种：`<style>`、`<data>`、`<note>`
+3. 文本只能放在 `<shape type="text">` 内的 `<content>` 中，不能在 `<slide>` 下直接写 `<title>` 或 `<body>`
+4. `<content>` 的子元素只能是 `<p>`、`<ul>`、`<ol>`
+5. 所有 `<shape>` 必须有属性：`type`、`topLeftX`、`topLeftY`、`width`、`height`
+6. `type="text"` 表示文本框，文本放在其 `<content>` 子元素中
+7. 渐变色必须用 `rgba()` 格式 + 百分比停靠点，例如 `linear-gradient(135deg,rgba(30,60,114,1) 0%,rgba(59,130,246,1) 100%)`
+8. 禁止使用 http(s) 外链图片（img src 只能用 file_token 或 @本地路径）
+9. 画布坐标系：宽 960，高 540
 
-## 页面布局
-- 封面页（cover）：居中大标题 + 副标题，渐变或深色背景
-- 内容页（content）：左侧标题区 + 右侧/下方要点列表
-- 数据页（data）：指标卡片 + 大号数字
-- 对比页（comparison）：并列卡片
-- 结尾页（ending）：居中感谢语 + 装饰线
+## 正确的 XML 结构示例
+
+封面页：
+<slide xmlns="http://www.larkoffice.com/sml/2.0">
+  <style>
+    <fill>
+      <fillColor color="linear-gradient(135deg,rgba(30,60,114,1) 0%,rgba(59,130,246,1) 100%)"/>
+    </fill>
+  </style>
+  <data>
+    <shape type="text" topLeftX="120" topLeftY="160" width="720" height="100">
+      <content textType="title" textAlign="center">
+        <p>演示文稿标题</p>
+      </content>
+    </shape>
+    <shape type="text" topLeftX="120" topLeftY="280" width="720" height="60">
+      <content textType="sub-headline" textAlign="center">
+        <p>副标题</p>
+      </content>
+    </shape>
+  </data>
+</slide>
+
+内容页：
+<slide xmlns="http://www.larkoffice.com/sml/2.0">
+  <style>
+    <fill>
+      <fillColor color="rgb(248,250,252)"/>
+    </fill>
+  </style>
+  <data>
+    <shape type="text" topLeftX="80" topLeftY="40" width="800" height="60">
+      <content textType="headline" textAlign="left">
+        <p>页面标题</p>
+      </content>
+    </shape>
+    <shape type="rect" topLeftX="80" topLeftY="100" width="800" height="2">
+      <fill>
+        <fillColor color="rgb(59,130,246)"/>
+      </fill>
+    </shape>
+    <shape type="text" topLeftX="80" topLeftY="120" width="800" height="380">
+      <content textType="body" textAlign="left">
+        <p>内容要点</p>
+        <ul>
+          <li><p>要点一</p></li>
+          <li><p>要点二</p></li>
+          <li><p>要点三</p></li>
+        </ul>
+      </content>
+    </shape>
+  </data>
+</slide>
+
+结尾页：
+<slide xmlns="http://www.larkoffice.com/sml/2.0">
+  <style>
+    <fill>
+      <fillColor color="linear-gradient(135deg,rgba(30,60,114,1) 0%,rgba(59,130,246,1) 100%)"/>
+    </fill>
+  </style>
+  <data>
+    <shape type="text" topLeftX="120" topLeftY="200" width="720" height="100">
+      <content textType="title" textAlign="center">
+        <p>谢谢！</p>
+      </content>
+    </shape>
+  </data>
+</slide>
+
+## 风格配色
+- 商务汇报：背景 rgb(248,250,252)，主色 rgb(30,60,114)，文字 rgb(30,41,59)
+- 科技产品：背景渐变 rgba(15,23,42,1)→rgba(56,97,140,1)，主色 rgb(59,130,246)，文字 rgb(255,255,255)
+- 教育培训：背景 rgb(255,255,255)，主色 rgb(34,197,94)，文字 rgb(51,65,85)
+- 创意设计：背景渐变 rgba(88,28,135,1)→rgba(190,24,93,1)，文字 rgb(255,255,255)
+- 简约专业：背景 rgb(248,250,252) + 顶部渐变条，主色 rgb(59,130,246)，文字 rgb(15,23,42)
 
 ## 输出格式
-返回 JSON 数组，每个元素是一页 slide 的 XML 字符串：
-["<slide>...</slide>", "<slide>...</slide>", ...]"""
+返回 JSON 数组，每个元素是一页 slide 的完整 XML 字符串：
+["<slide xmlns=\\\"http://www.larkoffice.com/sml/2.0\\\">...</slide>", ...]
+
+重要：每个 XML 字符串中的双引号必须转义为 \\\"（因为外层是 JSON 字符串）。"""
 
 
 @dataclass
@@ -153,22 +254,19 @@ class ContentStructurer:
             )
 
     async def generate_slides_xml(self, slides_outline: list[dict], style: str) -> SlidesXML:
-        """Generate slide XML from outline, page by page to avoid timeouts."""
+        """Generate slide XML from outline, one page at a time for best schema compliance."""
         all_slides = []
-
-        # Batch: generate 3 pages at a time to balance speed and token limits
-        batch_size = 3
         total = len(slides_outline)
-        F("slides_xml", "开始分批生成", total_pages=total, batch_size=batch_size, style=style[:40])
-        for i in range(0, len(slides_outline), batch_size):
-            batch = slides_outline[i:i + batch_size]
-            batch_text = json.dumps(batch, ensure_ascii=False, indent=2)
+        F("slides_xml", "开始逐页生成", total_pages=total, style=style[:40])
+
+        for i, page_outline in enumerate(slides_outline):
+            outline_text = json.dumps(page_outline, ensure_ascii=False, indent=2)
             user_msg = f"""风格：{style}
 
-幻灯片大纲（第{i+1}-{min(i+batch_size, len(slides_outline))}页）：
-{batch_text}
+第{i+1}/{total}页大纲：
+{outline_text}
 
-请生成这些页的完整 XML。输出 JSON 数组。"""
+请生成这一页的完整 SML 2.0 XML。输出 JSON 数组（只包含这1页）。"""
 
             messages = [
                 {"role": "system", "content": SLIDES_XML_SYSTEM_PROMPT},
@@ -178,13 +276,12 @@ class ContentStructurer:
             try:
                 import asyncio
 
-                hi = min(i + batch_size, total)
-                F("slides_xml", "批次 LLM", batch_from=i + 1, batch_to=hi, total=total)
+                F("slides_xml", "页面 LLM", page=i + 1, total=total)
                 response = await asyncio.to_thread(
                     self._client.chat.completions.create,
                     model=self._model,
                     messages=messages,
-                    temperature=0.4,
+                    temperature=0.3,
                 )
 
                 raw = response.choices[0].message.content.strip()
@@ -202,12 +299,26 @@ class ContentStructurer:
                 else:
                     batch_slides = [str(data)]
 
-                all_slides.extend(batch_slides)
-                F("slides_xml", "批次解析成功", added=len(batch_slides), cumulative=len(all_slides))
+                # Basic validation: check that each slide XML has required elements
+                valid_slides = []
+                for slide_xml in batch_slides:
+                    if isinstance(slide_xml, str) and _validate_slide_xml(slide_xml):
+                        valid_slides.append(slide_xml)
+                    elif isinstance(slide_xml, str):
+                        logger.warning("Slide XML validation failed for page %d, attempting fix", i + 1)
+                        # Try to fix common issues
+                        fixed = _fix_slide_xml(slide_xml)
+                        if _validate_slide_xml(fixed):
+                            valid_slides.append(fixed)
+                        else:
+                            logger.warning("Could not fix slide XML for page %d, skipping", i + 1)
+
+                all_slides.extend(valid_slides)
+                F("slides_xml", "页面解析成功", page=i + 1, valid=len(valid_slides), cumulative=len(all_slides))
             except Exception:
-                logger.exception("Failed to generate slides XML batch %d-%d", i+1, i+batch_size)
-                F("slides_xml", "批次失败已跳过", from_page=i + 1, to_page=min(i + batch_size, total))
+                logger.exception("Failed to generate slides XML page %d", i + 1)
+                F("slides_xml", "页面失败已跳过", page=i + 1)
                 continue
 
-        F("slides_xml", "全部批次结束", slides=len(all_slides))
+        F("slides_xml", "全部页面结束", slides=len(all_slides))
         return SlidesXML(slides=all_slides)

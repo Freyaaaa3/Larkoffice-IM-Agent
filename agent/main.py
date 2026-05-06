@@ -11,7 +11,7 @@ if _repo_root not in sys.path:
     sys.path.insert(0, _repo_root)
 
 from agent.config import FEISHU_APP_ID, FEISHU_APP_SECRET, LLM_API_KEY
-from agent.executor import Executor, LARK_CLI_PATH
+from agent.executor import Executor, LARK_CLI_CMD
 from agent.feishu_bot import FeishuBot
 from agent.flow import F
 from agent.planner import Planner
@@ -51,7 +51,7 @@ async def main():
     planner = Planner()
     F("boot", "Planner 已创建", model=getattr(planner, "_model", ""))
     executor = Executor()
-    F("boot", "Executor 已创建", lark_cli_path=LARK_CLI_PATH)
+    F("boot", "Executor 已创建", lark_cli_cmd=" ".join(LARK_CLI_CMD))
     workflow = ImToPptxWorkflow(bot, planner, executor)
     F("boot", "ImToPptxWorkflow 已挂载 IntentSystem")
 

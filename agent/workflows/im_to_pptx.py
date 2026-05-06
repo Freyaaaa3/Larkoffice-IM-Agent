@@ -432,14 +432,17 @@ class ImToPptxWorkflow:
 
                 if slides_xml.slides:
                     slides_json = json.dumps(slides_xml.slides, ensure_ascii=False)
-                    F("workflow.run", "步骤4 create_slides 调用中", chat_id=cid, json_chars=len(slides_json))
+                    F("workflow.run", "步骤4 create_slides 调用中", chat_id=cid, json_chars=len(slides_json), page_count=len(slides_xml.slides))
                     slides_result = await self.executor.create_slides(
                         title=plan.topic,
                         slides_json=slides_json,
                     )
 
-                    if slides_result.success and slides_result.data:
+                    # Extract slides_id even from partial success (data may be present)
+                    if slides_result.data:
                         slides_id = self._extract_slides_id(slides_result.data)
+
+                    if slides_result.success:
                         F("workflow.run", "步骤4 幻灯片 API 成功", chat_id=cid, slides_id=short_id(slides_id, 20))
                         if slides_id:
                             await self.bot.send_text(chat_id, "✅ 演示文稿已创建！")
@@ -449,9 +452,14 @@ class ImToPptxWorkflow:
                     else:
                         logger.error("Slides creation failed: %s", slides_result.error)
                         F("workflow.run", "步骤4 失败", chat_id=cid, error=(slides_result.error or "")[:100])
-                        await self.bot.send_text(
-                            chat_id, f"⚠️ 演示文稿创建失败：{slides_result.error[:100]}"
-                        )
+                        if slides_id:
+                            await self.bot.send_text(
+                                chat_id, f"⚠️ 演示文稿创建部分失败：{slides_result.error[:100]}\n但已有部分内容生成，正在获取链接..."
+                            )
+                        else:
+                            await self.bot.send_text(
+                                chat_id, f"⚠️ 演示文稿创建失败：{slides_result.error[:100]}"
+                            )
                 else:
                     F("workflow.run", "步骤4 中止：无 slides_xml", chat_id=cid)
                     await self.bot.send_text(chat_id, "⚠️ 幻灯片内容生成失败")
@@ -463,6 +471,16 @@ class ImToPptxWorkflow:
                     intent=plan.intent,
                     has_outline=bool(structured.slides_outline),
                 )
+
+            # Step 4.5: Set public sharing so links are accessible
+            for token, dtype in [(doc_token, "docx"), (slides_id, "slides")]:
+                if token:
+                    perm = await self.executor.set_public_sharing(token, dtype)
+                    if perm.success:
+                        F("workflow.run", "步骤4.5 公开权限设置成功", chat_id=cid, dtype=dtype)
+                    else:
+                        logger.warning("Failed to set public sharing for %s: %s", dtype, perm.error)
+                        F("workflow.run", "步骤4.5 权限设置失败", chat_id=cid, dtype=dtype, error=(perm.error or "")[:80])
 
             # Step 5: Deliver results (Scene F)
             F("workflow.run", "步骤5 _deliver", chat_id=cid, doc=bool(doc_token), slides=bool(slides_id))
@@ -557,13 +575,14 @@ class ImToPptxWorkflow:
     def _extract_url(self, data: dict, token: str) -> str:
         """Extract share URL from file metadata."""
         if isinstance(data, dict):
-            # drive metas batch_query returns: {"metas": [{"url": "..."}, ...]}
-            metas = data.get("metas", [])
-            if isinstance(metas, list):
-                for meta in metas:
-                    if isinstance(meta, dict) and meta.get("url"):
-                        return meta["url"]
-            url = data.get("url", "")
-            if url:
-                return url
-        return f"https://mcnu49qm2u6a.feishu.cn/docx/{token}"
+            # lark-cli returns the full API response, URL may be nested under data.metas
+            for container in (data, data.get("data", {})):
+                metas = container.get("metas", []) if isinstance(container, dict) else []
+                if isinstance(metas, list):
+                    for meta in metas:
+                        if isinstance(meta, dict) and meta.get("url"):
+                            return meta["url"]
+                url = container.get("url", "") if isinstance(container, dict) else ""
+                if url:
+                    return url
+        return f"https://mcnu49qm2u6a.feishu.cn/slides/{token}"
