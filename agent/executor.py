@@ -311,13 +311,17 @@ class Executor:
             "--query", query,
         )
 
-    async def list_chat_messages(self, chat_id: str, count: int = 20) -> ExecutionResult:
+    async def list_chat_messages(self, chat_id: str, count: int = 20,
+                                 page_token: str = "") -> ExecutionResult:
         """List recent messages in a chat."""
-        return await _run_lark_cli(
+        args = [
             "im", "+chat-messages-list",
             "--chat-id", chat_id,
             "--page-size", str(count),
-        )
+        ]
+        if page_token:
+            args.extend(["--page-token", page_token])
+        return await _run_lark_cli(*args)
 
     # -- Drive operations (Scene F) --
 

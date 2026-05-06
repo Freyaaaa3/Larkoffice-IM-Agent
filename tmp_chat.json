@@ -1,0 +1,88 @@
+{
+  "ok": true,
+  "identity": "user",
+  "data": {
+    "has_more": true,
+    "messages": [
+      {
+        "content": "🎉 任务完成！以下是生成的材料：\n\n📄 文档：https://mcnu49qm2u6a.feishu.cn/docx/MnfPdwC02oDqoZx3bZmcnFf5n4c\n📊 演示文稿：https://mcnu49qm2u6a.feishu.cn/slides/Rx8hsD6dplP1ahdcEIDcYe71n2b\n\n📝 摘要：本文档提供了一套通用的聊天记录总结与要点提炼框架，包含关键讨论主题、共识决策、待办事项及时间线四大模块。使用者需根据实际聊天内容填充占位信息，即可生成结构清晰、行动导向的会议纪要或汇报文档。\n\n如需修改，请告诉我具体调整内容。",
+        "create_time": "2026-05-07 04:35",
+        "deleted": false,
+        "message_id": "om_x100b508e1128e8a0b3fd4cc28634a50",
+        "msg_type": "text",
+        "sender": {
+          "id": "cli_a97e126327b89cde",
+          "id_type": "app_id",
+          "sender_type": "app",
+          "tenant_key": "1b1e6c42359b5758"
+        },
+        "updated": false
+      },
+      {
+        "content": "✅ 演示文稿已创建！",
+        "create_time": "2026-05-07 04:35",
+        "deleted": false,
+        "message_id": "om_x100b508e1165c8a0c147561adfc1aff",
+        "msg_type": "text",
+        "sender": {
+          "id": "cli_a97e126327b89cde",
+          "id_type": "app_id",
+          "sender_type": "app",
+          "tenant_key": "1b1e6c42359b5758"
+        },
+        "updated": false
+      },
+      {
+        "content": "📊 正在生成演示文稿...",
+        "create_time": "2026-05-07 04:32",
+        "deleted": false,
+        "message_id": "om_x100b508e18b410a0b224e89a249ec19",
+        "msg_type": "text",
+        "sender": {
+          "id": "cli_a97e126327b89cde",
+          "id_type": "app_id",
+          "sender_type": "app",
+          "tenant_key": "1b1e6c42359b5758"
+        },
+        "updated": false
+      },
+      {
+        "content": "✅ 文档已创建！",
+        "create_time": "2026-05-07 04:32",
+        "deleted": false,
+        "message_id": "om_x100b508e18a72ca0b3d44fce839c461",
+        "msg_type": "text",
+        "sender": {
+          "id": "cli_a97e126327b89cde",
+          "id_type": "app_id",
+          "sender_type": "app",
+          "tenant_key": "1b1e6c42359b5758"
+        },
+        "updated": false
+      },
+      {
+        "content": "📄 正在创建飞书文档...",
+        "create_time": "2026-05-07 04:32",
+        "deleted": false,
+        "message_id": "om_x100b508e18ec08a0b30d8da88c692ee",
+        "msg_type": "text",
+        "sender": {
+          "id": "cli_a97e126327b89cde",
+          "id_type": "app_id",
+          "sender_type": "app",
+          "tenant_key": "1b1e6c42359b5758"
+        },
+        "updated": true
+      }
+    ],
+    "page_token": "4cXSlmN7uFAnWWU5yfIGMGfhgAVkpwePzp9KO_vJSdRQQDH-MCj7ACzGzcJmMkBzkVKoAysXmKwEqqmj_ACoo6nxbxXbObkWTw6LxPoaRgV11frysW8fWBHQEZAiBZuJ",
+    "total": 5
+  },
+  "_notice": {
+    "update": {
+      "current": "1.0.23",
+      "latest": "1.0.24",
+      "message": "lark-cli 1.0.24 available, current 1.0.23"
+    }
+  }
+}

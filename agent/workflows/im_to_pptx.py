@@ -6,7 +6,7 @@ import logging
 from typing import Any
 
 from agent.config import GROUP_GATE_ENABLED
-from agent.executor import Executor
+from agent.executor import Executor, _run_lark_cli
 from agent.feishu_bot import FeishuBot
 from agent.flow import F, short_id
 from agent.group_two_stage_gate import GroupTwoStageGate
@@ -159,17 +159,29 @@ class ImToPptxWorkflow:
         F("workflow.card", "卡片动作→直接执行", chat_id=cid, action=action, text=text[:60])
         await self.bot.send_text(chat_id, "好的，开始执行！")
 
-        # Skip gate and intent pipeline, directly create plan and run
+        # Use planner to generate meaningful plan from chat history
         intent = "generate_pptx" if action == "create_ppt" else "generate_doc"
-        plan = Plan(
-            intent=intent,
-            topic=text.replace("帮我根据聊天记录", "").replace("整理成", "").replace("生成", ""),
-            audience="",
-            style="商务",
-            estimated_pages=8,
-            key_points=[],
-            source_context="",
-        )
+        chat_history_text = _dialogue_with_history(chat_id, text)
+
+        try:
+            plan = await self.planner.plan(
+                chat_history_text or text,
+                chat_history=None,
+            )
+            # Override intent to match the button action
+            plan.intent = intent
+            F("workflow.card", "Planner生成Plan", chat_id=cid, intent=plan.intent, topic=plan.topic[:60])
+        except Exception:
+            logger.exception("Card action planner failed, using default plan")
+            plan = Plan(
+                intent=intent,
+                topic=text.replace("帮我根据聊天记录", "").replace("整理成", "").replace("生成", ""),
+                audience="",
+                style="简约专业",
+                estimated_pages=8,
+                key_points=[],
+                source_context="",
+            )
         F("workflow.card", "直接构建Plan并执行", chat_id=cid, intent=plan.intent, topic=plan.topic[:60])
         asyncio.create_task(self._run_workflow(plan, chat_id))
 
@@ -372,11 +384,18 @@ class ImToPptxWorkflow:
         slides_id = ""
 
         try:
-            # Step 1: Gather source content (if from IM history)
+            # Step 1: Gather source content from chat history (user messages only)
             source_text = ""
-            if plan.source_context:
+            # Try to read recent chat messages as source material
+            chat_history = await self._get_chat_history(chat_id)
+            if chat_history:
+                source_text = chat_history
+                F("workflow.run", "步骤1 从群聊历史获取内容", chat_id=cid, source_len=len(source_text))
+            elif plan.source_context:
                 source_text = plan.source_context
-            F("workflow.run", "步骤1 源上下文", chat_id=cid, source_len=len(source_text or ""))
+                F("workflow.run", "步骤1 从plan.source_context", chat_id=cid, source_len=len(source_text))
+            else:
+                F("workflow.run", "步骤1 无源上下文", chat_id=cid)
 
             # Step 2: Structure content (Scene C preparation)
             await self.bot.send_text(chat_id, "📝 正在整理内容结构...")
@@ -571,6 +590,109 @@ class ImToPptxWorkflow:
             if found:
                 return found
         return ""
+
+    async def _get_chat_history(self, chat_id: str) -> str:
+        """Read recent user messages from the chat, filtering out bot replies.
+
+        Uses lark-cli +chat-messages-list with --as user (bot identity lacks permission).
+        Paginates through messages to collect enough user content.
+        """
+        all_user_texts: list[str] = []
+        bot_app_id = getattr(self.bot, "_app_id", "") or ""
+        page_token = ""
+        max_pages = 5
+
+        for _ in range(max_pages):
+            args = [
+                "im", "+chat-messages-list",
+                "--chat-id", chat_id,
+                "--page-size", "20",
+                "--as", "user",
+            ]
+            if page_token:
+                args.extend(["--page-token", page_token])
+
+            result = await _run_lark_cli(*args)
+            if not result.success or not result.data:
+                break
+
+            data = result.data
+            # Navigate: data.data.messages or data.messages
+            inner = data.get("data", data) if isinstance(data, dict) else {}
+            if not isinstance(inner, dict):
+                break
+            messages = inner.get("messages", [])
+
+            for msg in messages:
+                if not isinstance(msg, dict):
+                    continue
+                sender = msg.get("sender", {})
+                sender_type = sender.get("sender_type", "").lower()
+                sender_id = sender.get("id", "")
+                # Skip bot/app messages
+                if sender_type in ("app", "bot"):
+                    continue
+                if bot_app_id and sender_id == bot_app_id:
+                    continue
+
+                content = msg.get("content", "")
+                msg_type = msg.get("msg_type", "")
+                text = ""
+                if msg_type == "text":
+                    try:
+                        parsed = json.loads(content)
+                        text = parsed.get("text", "") if isinstance(parsed, dict) else str(parsed)
+                    except (json.JSONDecodeError, TypeError):
+                        text = content
+                elif msg_type == "post":
+                    try:
+                        parsed = json.loads(content)
+                        text = self._extract_post_text(parsed)
+                    except (json.JSONDecodeError, TypeError):
+                        text = content[:200]
+                else:
+                    continue
+
+                text = text.strip()
+                if text:
+                    all_user_texts.append(text)
+
+            # Check if there are more pages
+            if not inner.get("has_more"):
+                break
+            page_token = inner.get("page_token", "")
+            if not page_token:
+                break
+
+        if not all_user_texts:
+            return ""
+
+        # Messages come newest-first; reverse for chronological order
+        all_user_texts.reverse()
+        return "\n".join(all_user_texts)
+
+    @staticmethod
+    def _extract_post_text(post_data: dict) -> str:
+        """Extract plain text from a Feishu post (rich text) message."""
+        if not isinstance(post_data, dict):
+            return ""
+        content = post_data.get("content", [])
+        if not isinstance(content, list):
+            return ""
+        parts = []
+        for block in content:
+            if not isinstance(block, dict):
+                continue
+            # Each block has a list of text runs
+            for run in block.get("content", []):
+                if not isinstance(run, dict):
+                    continue
+                # text_run has text content
+                text = run.get("text", "") or run.get("content", "")
+                if isinstance(text, str) and text.strip():
+                    parts.append(text.strip())
+            # Also check for link, at, etc.
+        return " ".join(parts)
 
     def _extract_url(self, data: dict, token: str) -> str:
         """Extract share URL from file metadata."""
