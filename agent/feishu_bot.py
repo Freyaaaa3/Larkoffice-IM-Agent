@@ -70,6 +70,8 @@ def fetch_bot_open_id(app_id: str, app_secret: str, base_url: str | None = None)
 
 MessageHandler = Callable[[str, str, str, str], Coroutine[Any, Any, None]]
 # Args: (text, chat_id, message_id, chat_type) -> None；chat_type 为 p2p | group
+CardActionHandler = Callable[[str, str, str], Coroutine[Any, Any, None]]
+# Args: (action, chat_id, open_message_id) -> None
 
 
 class FeishuBot:
@@ -79,6 +81,7 @@ class FeishuBot:
         self._client: lark.Client | None = None
         self._ws_client: Any = None
         self._handler: MessageHandler | None = None
+        self._card_action_handler: CardActionHandler | None = None
         self._bot_open_id: str = ""
         # 防止 WS 重复投递同一条消息导致「分析→规划」循环
         self._processed_message_ids: set[str] = set()
@@ -111,6 +114,9 @@ class FeishuBot:
     def on_message(self, handler: MessageHandler):
         self._handler = handler
 
+    def on_card_action(self, handler: CardActionHandler):
+        self._card_action_handler = handler
+
     async def start(self):
         if not self._app_id or not self._app_secret:
             raise RuntimeError("FEISHU_APP_ID and FEISHU_APP_SECRET must be set in .env")
@@ -131,6 +137,7 @@ class FeishuBot:
             .register_p2_im_message_receive_v1(self._on_message_event)
             # 飞书会推送「消息已读」事件；不注册则 SDK 反复报 processor not found
             .register_p2_im_message_message_read_v1(self._on_message_read_v1)
+            .register_p2_card_action_trigger(self._on_card_action)
             .build()
         )
 
@@ -183,6 +190,40 @@ class FeishuBot:
     def _on_message_read_v1(self, _data: Any) -> None:
         """消息已读回执，无业务逻辑；仅占位注册以消除 WS 层 processor not found。"""
         return
+
+    def _on_card_action(self, data: Any):
+        """卡片按钮回调：提取 action 和 chat_id，转给 handler。"""
+        try:
+            event = getattr(data, "event", None)
+            if not event:
+                return
+            action_obj = getattr(event, "action", None)
+            context = getattr(event, "context", None)
+            if not action_obj or not context:
+                return
+
+            value = getattr(action_obj, "value", None) or {}
+            action_name = value.get("action", "")
+            chat_id = getattr(context, "open_chat_id", "") or ""
+            message_id = getattr(context, "open_message_id", "") or ""
+
+            if not action_name or not chat_id:
+                F("card.action", "缺少 action 或 chat_id", value=value)
+                return
+
+            F("card.action", "收到卡片回调", action=action_name, chat_id=short_id(chat_id))
+
+            if self._card_action_handler:
+                asyncio.create_task(
+                    self._card_action_handler(action_name, chat_id, message_id)
+                )
+
+            from lark_oapi.event.callback.model.p2_card_action_trigger import P2CardActionTriggerResponse
+            return P2CardActionTriggerResponse()
+        except Exception:
+            logger.exception("Error handling card action")
+            from lark_oapi.event.callback.model.p2_card_action_trigger import P2CardActionTriggerResponse
+            return P2CardActionTriggerResponse()
 
     def _on_message_event(self, data: lark.im.v1.P2ImMessageReceiveV1) -> None:
         try:

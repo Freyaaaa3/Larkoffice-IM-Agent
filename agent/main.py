@@ -57,8 +57,10 @@ async def main():
 
     # Register message handler
     bot.on_message(workflow.handle_message)
+    bot.on_card_action(workflow.handle_card_action)
     bot._allow_unmentioned_group_msg = has_pending_plan
     F("boot", "已注册 workflow.handle_message → bot.on_message")
+    F("boot", "已注册 workflow.handle_card_action → bot.on_card_action")
 
     # Start the bot（WebSocket 成功后会阻塞等待事件，终端不再刷日志属正常）
     logger.info("Starting Feishu Agent...")

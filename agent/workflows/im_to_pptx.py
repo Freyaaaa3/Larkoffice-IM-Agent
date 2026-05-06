@@ -127,6 +127,52 @@ class ImToPptxWorkflow:
         self._intent = IntentSystem(planner)
         self._group_gate = GroupTwoStageGate()
 
+    # 按钮动作 → 模拟文本消息映射
+    _CARD_ACTION_TEXT = {
+        "create_doc": "帮我根据聊天记录整理成文档",
+        "create_ppt": "帮我根据聊天记录生成PPT",
+        "detail_page": "进入详细页面",
+    }
+
+    async def handle_card_action(
+        self, action: str, chat_id: str, message_id: str
+    ) -> None:
+        """Handle card button callback: directly execute without gate/confirmation."""
+        cid = short_id(chat_id)
+
+        # If there's a pending plan, clear it first
+        if chat_id in _pending_plans:
+            _pending_plans.pop(chat_id, None)
+            self._group_gate.clear_buffer(chat_id)
+
+        # If a workflow is already running, reject
+        if _active_workflows.get(chat_id):
+            F("workflow.card", "任务执行中，忽略卡片动作", chat_id=cid, action=action)
+            await self.bot.send_text(chat_id, "正在处理上一个任务，请稍等...")
+            return
+
+        text = self._CARD_ACTION_TEXT.get(action, "")
+        if not text:
+            F("workflow.card", "未知卡片动作", chat_id=cid, action=action)
+            return
+
+        F("workflow.card", "卡片动作→直接执行", chat_id=cid, action=action, text=text[:60])
+        await self.bot.send_text(chat_id, "好的，开始执行！")
+
+        # Skip gate and intent pipeline, directly create plan and run
+        intent = "generate_pptx" if action == "create_ppt" else "generate_doc"
+        plan = Plan(
+            intent=intent,
+            topic=text.replace("帮我根据聊天记录", "").replace("整理成", "").replace("生成", ""),
+            audience="",
+            style="商务",
+            estimated_pages=8,
+            key_points=[],
+            source_context="",
+        )
+        F("workflow.card", "直接构建Plan并执行", chat_id=cid, intent=plan.intent, topic=plan.topic[:60])
+        asyncio.create_task(self._run_workflow(plan, chat_id))
+
     async def handle_message(
         self, text: str, chat_id: str, message_id: str, chat_type: str = "p2p"
     ) -> None:
