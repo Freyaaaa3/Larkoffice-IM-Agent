@@ -10,6 +10,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 from dataclasses import dataclass
 from typing import Literal
 
@@ -19,6 +20,8 @@ from agent.config import GROUP_GATE_BUFFER_MAX, GROUP_GATE_ENABLED, LLM_API_KEY,
 from agent.flow import F, pipeline_log, short_id
 from agent.IntentSystem import (
     AgentRuntimeState,
+    TriggerSignals,
+    _has_strong_task_signal,
     detect_triggers,
     summarize_dialogue,
     weak_trigger_coarse_pass,
@@ -87,7 +90,25 @@ def _extract_json_object(raw: str) -> dict:
         raw = raw.split("```json", 1)[1].split("```", 1)[0].strip()
     elif "```" in raw:
         raw = raw.split("```", 1)[1].split("```", 1)[0].strip()
-    return json.loads(raw)
+    # Try strict parse first
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError:
+        pass
+    # Loose: extract first { ... } block and fix common issues
+    i = raw.find("{")
+    j = raw.rfind("}")
+    if i >= 0 and j > i:
+        chunk = raw[i : j + 1]
+        # Fix Python-style bools
+        chunk = chunk.replace("True", "true").replace("False", "false")
+        # Strip trailing commas before } or ]
+        chunk = re.sub(r",\s*([}\]])", r"\1", chunk)
+        try:
+            return json.loads(chunk)
+        except json.JSONDecodeError:
+            pass
+    return json.loads(raw)  # re-raise original error
 
 
 class GroupTwoStageGate:
@@ -168,29 +189,35 @@ class GroupTwoStageGate:
             pipeline_log("群门控", 4, "policy", "丢弃(silent_discard) | 粗筛未通过")
             return GroupGateResult(action="silent_discard")
 
-        # 阶段1：有用性
-        try:
-            d1 = await self._llm_json(STAGE1_SYSTEM, f"消息：\n{t}\n\n只输出 JSON。")
-            useful = bool(d1.get("useful"))
-            F("group.gate", "阶段1", chat_id=cid, useful=useful, reason=str(d1.get("reason", ""))[:40])
-        except Exception as e:
-            logger.warning("group gate stage1 LLM 失败，保守丢弃: %s", e)
-            F("group.gate", "阶段1 异常→丢弃", chat_id=cid, err=str(e)[:80])
-            pipeline_log("群门控", 2, "有用性", f"异常→丢弃 err={str(e)[:60]} chat={cid}")
-            pipeline_log("群门控", 3, "对话状态", "跳过 | 阶段1失败")
-            pipeline_log("群门控", 4, "policy", "丢弃(silent_discard)")
-            return GroupGateResult(action="silent_discard")
+        # 阶段1：有用性（强任务信号直接放行，跳过LLM）
+        strong_task = _has_strong_task_signal(sig)
+        if strong_task:
+            useful = True
+            F("group.gate", "阶段1跳过(强信号)", chat_id=cid)
+            pipeline_log("群门控", 2, "有用性", f"跳过(LLM) | 强任务信号直接放行 chat={cid}")
+        else:
+            try:
+                d1 = await self._llm_json(STAGE1_SYSTEM, f"消息：\n{t}\n\n只输出 JSON。")
+                useful = bool(d1.get("useful"))
+                F("group.gate", "阶段1", chat_id=cid, useful=useful, reason=str(d1.get("reason", ""))[:40])
+            except Exception as e:
+                logger.warning("group gate stage1 LLM 失败，保守丢弃: %s", e)
+                F("group.gate", "阶段1 异常→丢弃", chat_id=cid, err=str(e)[:80])
+                pipeline_log("群门控", 2, "有用性", f"异常→丢弃 err={str(e)[:60]} chat={cid}")
+                pipeline_log("群门控", 3, "对话状态", "跳过 | 阶段1失败")
+                pipeline_log("群门控", 4, "policy", "丢弃(silent_discard)")
+                return GroupGateResult(action="silent_discard")
 
-        if not useful:
-            pipeline_log(
-                "群门控",
-                2,
-                "有用性",
-                f"判定=丢弃(不入缓存) reason={str(d1.get('reason', ''))[:40]} chat={cid}",
-            )
-            pipeline_log("群门控", 3, "对话状态", "跳过 | 本条未入缓存")
-            pipeline_log("群门控", 4, "policy", "丢弃(silent_discard)")
-            return GroupGateResult(action="silent_discard")
+            if not useful:
+                pipeline_log(
+                    "群门控",
+                    2,
+                    "有用性",
+                    f"判定=丢弃(不入缓存) reason={str(d1.get('reason', ''))[:40]} chat={cid}",
+                )
+                pipeline_log("群门控", 3, "对话状态", "跳过 | 本条未入缓存")
+                pipeline_log("群门控", 4, "policy", "丢弃(silent_discard)")
+                return GroupGateResult(action="silent_discard")
 
         self._append_buffer(chat_id, message_id, t)
         merged = self._merge_buffer(chat_id)
@@ -208,6 +235,14 @@ class GroupTwoStageGate:
             buf=_buf_n,
             merged_len=len(merged),
         )
+
+        # 强任务信号直接放行，跳过阶段2 LLM
+        if strong_task:
+            self.clear_buffer(chat_id)
+            F("group.gate", "强信号→跳过阶段2直接放行", chat_id=cid)
+            pipeline_log("群门控", 3, "对话状态", f"跳过(LLM) | 强任务信号快速通道 chat={cid}")
+            pipeline_log("群门控", 4, "policy", f"path=proceed 强信号直接放行 chat={cid}")
+            return GroupGateResult(action="proceed", merged_text=merged, force_execute_on_confirm_plan=False)
 
         # 阶段2：对话状态（三维度 bool → 打印为 0/1 分 + 均值）
         try:
@@ -250,6 +285,22 @@ class GroupTwoStageGate:
             return GroupGateResult(action="silent_buffered")
 
         # 规则分支（与产品约定一致）
+        # 强任务信号 + task_presence=true → 直接进入主流程，不等待 readiness/timing
+        if strong_task and tp:
+            self.clear_buffer(chat_id)
+            F("group.gate", "强信号+任务存在→进入主流程", chat_id=cid)
+            pipeline_log(
+                "群门控",
+                4,
+                "policy",
+                f"path=proceed 强信号快速通道(后续 IntentSystem/Planner) 已清缓存 chat={cid}",
+            )
+            return GroupGateResult(
+                action="proceed",
+                merged_text=merged,
+                force_execute_on_confirm_plan=False,
+            )
+
         if tp and r and tm:
             self.clear_buffer(chat_id)
             F("group.gate", "三维满足→进入主流程并倾向直接执行", chat_id=cid)

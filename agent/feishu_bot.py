@@ -83,6 +83,8 @@ class FeishuBot:
         # 防止 WS 重复投递同一条消息导致「分析→规划」循环
         self._processed_message_ids: set[str] = set()
         self._processed_message_ids_cap = 4000
+        # 群聊未@时是否放行（由 workflow 层设置，如 pending plan 时放行确认消息）
+        self._allow_unmentioned_group_msg: Callable[[str], bool] | None = None
 
     def _sender_is_bot_self(self, sender) -> bool:
         """忽略本机器人发出的消息，避免把「正在分析…」等回执当作用户输入再次规划。"""
@@ -222,11 +224,16 @@ class FeishuBot:
             # Extract text content
             text = self._extract_text(msg)
 
-            # In group chats, only respond when @mentioned
+            # In group chats, only respond when @mentioned (unless callback allows)
             if chat_type == "group":
                 if not self._is_mentioned(msg):
-                    F("im.filter", "跳过", reason="group_not_mentioned", chat_id=short_id(chat_id))
-                    return
+                    allow = (
+                        self._allow_unmentioned_group_msg is not None
+                        and self._allow_unmentioned_group_msg(chat_id)
+                    )
+                    if not allow:
+                        F("im.filter", "跳过", reason="group_not_mentioned", chat_id=short_id(chat_id))
+                        return
                 text = self._strip_mention(text)
 
             if not text.strip():

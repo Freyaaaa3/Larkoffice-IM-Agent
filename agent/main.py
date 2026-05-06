@@ -15,7 +15,7 @@ from agent.executor import Executor, LARK_CLI_PATH
 from agent.feishu_bot import FeishuBot
 from agent.flow import F
 from agent.planner import Planner
-from agent.workflows.im_to_pptx import ImToPptxWorkflow
+from agent.workflows.im_to_pptx import ImToPptxWorkflow, has_pending_plan
 
 logging.basicConfig(
     level=logging.INFO,
@@ -57,6 +57,7 @@ async def main():
 
     # Register message handler
     bot.on_message(workflow.handle_message)
+    bot._allow_unmentioned_group_msg = has_pending_plan
     F("boot", "已注册 workflow.handle_message → bot.on_message")
 
     # Start the bot（WebSocket 成功后会阻塞等待事件，终端不再刷日志属正常）

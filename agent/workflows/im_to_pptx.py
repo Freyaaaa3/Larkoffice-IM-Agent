@@ -24,6 +24,10 @@ logger = logging.getLogger(__name__)
 
 # Session state: tracks pending confirmations and active workflows
 _pending_plans: dict[str, Plan] = {}  # chat_id -> Plan awaiting confirmation
+
+
+def has_pending_plan(chat_id: str) -> bool:
+    return chat_id in _pending_plans
 _active_workflows: dict[str, bool] = {}  # chat_id -> is running
 _chat_intent_states: dict[str, AgentRuntimeState] = {}  # IntentSystem 会话状态
 # 按会话保留最近用户消息，供 IntentSystem / Planner 多轮上文（WS 仅逐条推送，需本地累积）
@@ -139,7 +143,11 @@ class ImToPptxWorkflow:
         )
         # Check if this is a confirmation for a pending plan
         if chat_id in _pending_plans:
-            if text.strip() in ("确认", "确认执行", "开始", "执行", "ok", "OK", "yes"):
+            cleaned = text.strip()
+            logger.info("[workflow] pending_plan check: chat=%s text=%r", cid, cleaned)
+            _confirm_kw = ("确认", "确认执行", "开始", "执行", "ok", "OK", "yes", "好的", "可以", "是")
+            _cancel_kw = ("取消", "不", "no", "cancel", "不了", "不要")
+            if any(kw in cleaned for kw in _confirm_kw) and not any(kw in cleaned for kw in _cancel_kw):
                 plan = _pending_plans.pop(chat_id)
                 _append_user_history(chat_id, text)
                 self._group_gate.clear_buffer(chat_id)
@@ -147,7 +155,7 @@ class ImToPptxWorkflow:
                 await self.bot.send_text(chat_id, "好的，开始执行！")
                 asyncio.create_task(self._run_workflow(plan, chat_id))
                 return
-            elif text.strip() in ("取消", "不", "no", "cancel"):
+            elif any(kw in cleaned for kw in _cancel_kw):
                 _pending_plans.pop(chat_id, None)
                 _append_user_history(chat_id, text)
                 self._group_gate.clear_buffer(chat_id)

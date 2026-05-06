@@ -188,6 +188,16 @@ def compute_trigger_score(signals: TriggerSignals) -> float:
     return min(1.0, w)
 
 
+def _has_strong_task_signal(signals: TriggerSignals) -> bool:
+    return (
+        signals.ppt_request
+        or signals.doc_request
+        or signals.report_need
+        or signals.modify_request
+        or signals.deliver_request
+    )
+
+
 def weak_trigger_coarse_pass(
     signals: TriggerSignals, state: AgentRuntimeState
 ) -> tuple[bool, float]:
@@ -195,14 +205,7 @@ def weak_trigger_coarse_pass(
     if state.memory.get("force_reasoning"):
         return True, 1.0
     score = compute_trigger_score(signals)
-    task_like = (
-        signals.ppt_request
-        or signals.doc_request
-        or signals.report_need
-        or signals.modify_request
-        or signals.deliver_request
-    )
-    if signals.casual_or_opening and not task_like:
+    if signals.casual_or_opening and not _has_strong_task_signal(signals):
         return False, score
     if state.silent_mode and score < 0.25:
         return False, score
@@ -283,6 +286,10 @@ DIALOGUE_STATE_SYSTEM = """你是群聊/多轮对话状态分析器。输入为�
 
 def _gate_model() -> str:
     return os.environ.get("LLM_MODEL_GATE", "").strip() or LLM_MODEL
+
+
+def _gate_base_url() -> str | None:
+    return os.environ.get("LLM_BASE_URL_GATE", "").strip() or None
 
 
 def _extract_json_block(raw: str) -> dict:
@@ -485,8 +492,18 @@ class IntentSystem:
 
     async def _llm_json(self, system: str, user: str) -> tuple[dict, str]:
         model = _gate_model()
+        base_url = _gate_base_url()
+        # Use gate-specific client if base_url differs from main LLM
+        client = self._oai
+        if base_url and base_url != (LLM_BASE_URL or ""):
+            client = OpenAI(
+                api_key=os.environ.get("LLM_API_KEY_GATE", "").strip() or LLM_API_KEY,
+                base_url=base_url,
+                timeout=90.0,
+                max_retries=1,
+            )
         resp = await asyncio.to_thread(
-            self._oai.chat.completions.create,
+            client.chat.completions.create,
             model=model,
             messages=[
                 {"role": "system", "content": system},
@@ -605,15 +622,22 @@ class IntentSystem:
                 trigger_signals=signals,
             )
 
-        useful = await self._message_useful_score(context)
-        F("intent.msg_filter", "有用性", chat_id=cid, useful_score=useful)
-        pipeline_log(
-            "意图",
-            2,
-            "有用性",
-            f"score={useful:.3f} 判定={'通过→继续' if useful >= MESSAGE_USEFUL_MIN else '丢弃(静默)'} "
-            f"阈值>={MESSAGE_USEFUL_MIN} chat={cid}",
-        )
+        # 强任务信号直接放行，跳过有用性 LLM
+        strong_task = _has_strong_task_signal(signals)
+        if strong_task:
+            useful = 1.0
+            F("intent.msg_filter", "有用性跳过(强信号)", chat_id=cid, useful_score=useful)
+            pipeline_log("意图", 2, "有用性", f"跳过(LLM) | 强任务信号直接放行 chat={cid}")
+        else:
+            useful = await self._message_useful_score(context)
+            F("intent.msg_filter", "有用性", chat_id=cid, useful_score=useful)
+            pipeline_log(
+                "意图",
+                2,
+                "有用性",
+                f"score={useful:.3f} 判定={'通过→继续' if useful >= MESSAGE_USEFUL_MIN else '丢弃(静默)'} "
+                f"阈值>={MESSAGE_USEFUL_MIN} chat={cid}",
+            )
         if useful < MESSAGE_USEFUL_MIN:
             F(
                 "intent.msg_filter",
@@ -629,25 +653,36 @@ class IntentSystem:
                 trigger_signals=signals,
             )
 
-        ds = await self._dialogue_state_scores(dialogue)
-        F(
-            "intent.dialogue_state",
-            "对话状态",
-            chat_id=cid,
-            task_presence=ds.task_presence,
-            readiness=ds.readiness,
-            consensus=ds.consensus,
-            trigger_score=ds.trigger_score,
-        )
-        _avg3 = (ds.task_presence + ds.readiness + ds.consensus) / 3.0
-        pipeline_log(
-            "意图",
-            3,
-            "对话状态",
-            f"task_presence={ds.task_presence:.3f} readiness={ds.readiness:.3f} "
-            f"consensus={ds.consensus:.3f} 三维均值={_avg3:.3f} "
-            f"总触发分trigger_score={ds.trigger_score:.3f} chat={cid}",
-        )
+        # 强任务信号跳过对话状态LLM，直接设高分进入规划
+        if strong_task:
+            ds = DialogueStateSnapshot(
+                task_presence=0.9,
+                readiness=0.8,
+                consensus=0.8,
+                trigger_score=0.9,
+            )
+            F("intent.dialogue_state", "对话状态跳过(强信号)", chat_id=cid, trigger_score=ds.trigger_score)
+            pipeline_log("意图", 3, "对话状态", f"跳过(LLM) | 强任务信号直接放行 chat={cid}")
+        else:
+            ds = await self._dialogue_state_scores(dialogue)
+            F(
+                "intent.dialogue_state",
+                "对话状态",
+                chat_id=cid,
+                task_presence=ds.task_presence,
+                readiness=ds.readiness,
+                consensus=ds.consensus,
+                trigger_score=ds.trigger_score,
+            )
+            _avg3 = (ds.task_presence + ds.readiness + ds.consensus) / 3.0
+            pipeline_log(
+                "意图",
+                3,
+                "对话状态",
+                f"task_presence={ds.task_presence:.3f} readiness={ds.readiness:.3f} "
+                f"consensus={ds.consensus:.3f} 三维均值={_avg3:.3f} "
+                f"总触发分trigger_score={ds.trigger_score:.3f} chat={cid}",
+            )
         state.update({"last_dialogue_state": asdict(ds)})
 
         route, ask_prompt = self._policy.decide_execution_route(ds, state=state)

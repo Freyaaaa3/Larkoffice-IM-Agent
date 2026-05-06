@@ -87,7 +87,7 @@ class Plan:
         for task in self.subtasks:
             lines.append(f"  {task['id']}. {task['description']}")
         lines.append("")
-        lines.append("回复「确认」开始执行，或告诉我需要调整的地方。")
+        lines.append("回复「确认」开始执行，或告诉我需要调整的地方。（群聊中无需@机器人）")
         return "\n".join(lines)
 
 
