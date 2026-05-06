@@ -12,7 +12,7 @@ import logging
 import os
 import re
 from dataclasses import dataclass
-from typing import Literal
+from typing import Any, Literal
 
 from openai import OpenAI
 
@@ -84,7 +84,7 @@ class GroupGateResult:
     force_execute_on_confirm_plan: bool = False
 
 
-def _extract_json_object(raw: str) -> dict:
+def _extract_json_object(raw: str) -> dict[str, Any]:
     raw = (raw or "").strip()
     if "```json" in raw:
         raw = raw.split("```json", 1)[1].split("```", 1)[0].strip()
@@ -140,7 +140,7 @@ class GroupTwoStageGate:
         parts = [f"[{i + 1}] {x['text']}" for i, x in enumerate(buf)]
         return "\n\n".join(parts).strip()
 
-    async def _llm_json(self, system: str, user: str) -> dict:
+    async def _llm_json(self, system: str, user: str) -> dict[str, Any]:
         model = _gate_model()
         resp = await asyncio.to_thread(
             self._client.chat.completions.create,

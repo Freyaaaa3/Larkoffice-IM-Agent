@@ -147,26 +147,124 @@ def summarize_dialogue(dialogue: str, max_chars: int = 4000) -> str:
 def detect_triggers(context: str) -> TriggerSignals:
     t = context.lower()
     signals = TriggerSignals()
-    # 中文关键词
+
+    # =========================
+    # 1️⃣ 报告 / 汇报类（扩展表达）
+    # =========================
     signals.report_need = bool(
-        re.search(r"汇报|总结|季度|年报|述职|review|deck|slides?", t, re.I)
-    )
-    signals.modify_request = bool(re.search(r"改|调整|替换|删页|加页|修改", t))
-    signals.uncertainty = bool(re.search(r"不知道|不确定|哪个|是否|怎么|能否", t))
-    signals.doc_request = bool(re.search(r"文档|docx|飞书文档|写个材料", t, re.I))
-    signals.ppt_request = bool(
-        re.search(r"ppt|幻灯片|演示|deck|keynote|汇报稿", t, re.I)
-    )
-    signals.deliver_request = bool(re.search(r"发我|分享|链接|交付|导出", t))
-    signals.casual_or_opening = bool(
         re.search(
-            r"你好|您好|在吗|在不在|hi|hello|hey|帮忙|帮我|请问|需要|想|要做|做个|生成|写个|ppt|幻灯片|文档",
+            r"(汇报|总结|复盘|季度|年报|述职|review|deck|slides?|分享|报告|讲一下|介绍一下|汇总)",
             t,
             re.I,
         )
     )
-    return signals
 
+    # =========================
+    # 2️⃣ 修改类（强+弱）
+    # =========================
+    strong_modify = r"(修改|重写|优化|调整|改一下|重新做|改一版|改一下这个)"
+    weak_modify = r"(改|换|动一下|修一下|处理一下)"
+
+    has_strong_modify = re.search(strong_modify, t)
+    has_weak_modify = re.search(weak_modify, t)
+
+    signals.modify_request = bool(
+        has_strong_modify
+        or (has_weak_modify and re.search(r"(ppt|文档|方案|这个|内容)", t))
+    )
+
+    # =========================
+    # 3️⃣ 不确定性（扩展）
+    # =========================
+    signals.uncertainty = bool(
+        re.search(
+            r"(不知道|不确定|哪个|是否|怎么|能否|行不行|可以吗|咋办|怎么办|有没有|要不要)",
+            t,
+        )
+    )
+
+    # =========================
+    # 4️⃣ 文档类（扩展语义）
+    # =========================
+    signals.doc_request = bool(
+        re.search(
+            r"(文档|docx|飞书文档|材料|说明|方案|策划|写个材料|整理一下文档|写一份|搞个文档)",
+            t,
+            re.I,
+        )
+    )
+
+    # =========================
+    # 5️⃣ PPT类（扩展表达）
+    # =========================
+    signals.ppt_request = bool(
+        re.search(
+            r"(ppt|幻灯片|演示|deck|keynote|汇报稿|做个ppt|搞个ppt|整理ppt)",
+            t,
+            re.I,
+        )
+    )
+
+    # =========================
+    # 6️⃣ 交付类（扩展）
+    # =========================
+    signals.deliver_request = bool(
+        re.search(
+            r"(发我|给我|分享|链接|交付|导出|传一下|同步一下|发出来|丢给我)",
+            t,
+        )
+    )
+
+    # =========================
+    # 7️⃣ Casual（弱信号，严格限制）
+    # =========================
+    casual = re.search(
+        r"(你好|您好|在吗|在不在|hi|hello|hey)",
+        t,
+        re.I,
+    )
+
+    request_words = re.search(
+        r"(帮我|请帮|需要|想要|做个|写个|搞个|弄个)",
+        t,
+    )
+
+    # ⚠️ 只有“请求词 + 任务词”才算弱触发
+    task_words = re.search(
+        r"(ppt|文档|方案|汇报|材料|内容)",
+        t,
+    )
+
+    signals.casual_or_opening = bool(
+        casual
+        or (request_words and task_words)
+    )
+
+    # =========================
+    # 8️⃣ 讨论类（关键补充）
+    # =========================
+    discussion_patterns = r"""
+    (我觉得|我认为|可以考虑|是不是|要不要|是否需要|
+    先讨论|先看一下|先想一下|方案|思路|方向|逻辑|
+    可以从.*入手|我们可以|建议|倾向于)
+    """
+
+    signals.discussion_signal = bool(re.search(discussion_patterns, t, re.X))
+
+
+    # =========================
+    # 9️⃣ 背景 / 约束信息（你缺的核心）
+    # =========================
+    context_patterns = r"""
+    (针对|面向|适用于|用户群体|目标用户|
+    青少年|儿童|老人|学生|用户|
+    时间紧|周期|预算|要求|限制|
+    对内|对外|汇报|场景|背景)
+    """
+
+    signals.context_signal = bool(re.search(context_patterns, t, re.X))
+
+    return signals
 
 def compute_trigger_score(signals: TriggerSignals) -> float:
     """0~1：多信号加权，表示介入必要性。"""
@@ -292,7 +390,7 @@ def _gate_base_url() -> str | None:
     return os.environ.get("LLM_BASE_URL_GATE", "").strip() or None
 
 
-def _extract_json_block(raw: str) -> dict:
+def _extract_json_block(raw: str) -> dict[str, Any]:
     raw = (raw or "").strip()
     if "```json" in raw:
         raw = raw.split("```json", 1)[1].split("```", 1)[0].strip()
@@ -301,7 +399,7 @@ def _extract_json_block(raw: str) -> dict:
     return json.loads(raw)
 
 
-def _extract_json_block_loose(raw: str) -> dict:
+def _extract_json_block_loose(raw: str) -> dict[str, Any]:
     """从模型回复中解析 JSON；失败时尝试截取首尾花括号内子串（常见前后缀废话）。"""
     raw = (raw or "").strip()
     if not raw:
@@ -316,7 +414,7 @@ def _extract_json_block_loose(raw: str) -> dict:
         raise
 
 
-def _get_json_flexible(d: dict, *keys: str) -> Any:
+def _get_json_flexible(d: dict[str, Any], *keys: str) -> Any:
     """大小写不敏感取键（缓解模型键名漂移）。"""
     lower_map = {str(k).strip().lower(): v for k, v in d.items()}
     for k in keys:
@@ -364,13 +462,13 @@ def generate_intents(context: str, constraints: TriggerSignals) -> list[IntentHy
     return hypos[:5]
 
 
-def retrieve_similar_cases(context: str, state: AgentRuntimeState, top_k: int = 3) -> list[dict]:
+def retrieve_similar_cases(context: str, state: AgentRuntimeState, top_k: int = 3) -> list[dict[str, Any]]:
     """从 state.memory['cases'] 里做关键词重叠检索（可替换为向量库）。"""
-    cases: list[dict] = state.memory.get("cases") or []
+    cases: list[dict[str, Any]] = state.memory.get("cases") or []
     if not cases:
         return []
     words = set(re.findall(r"[\w\u4e00-\u9fff]+", context.lower()))
-    scored: list[tuple[float, dict]] = []
+    scored: list[tuple[float, dict[str, Any]]] = []
     for c in cases:
         blob = (c.get("summary") or "") + " " + (c.get("intent") or "")
         cw = set(re.findall(r"[\w\u4e00-\u9fff]+", blob.lower()))
@@ -406,7 +504,7 @@ class PlanningLayer:
         *,
         context_summary: str,
         document: str,
-        chat_history: list[dict] | None,
+        chat_history: list[dict[str, Any]] | None,
         constraints: TriggerSignals,
     ) -> Plan:
         prefix_parts = [constraints.to_constraint_prefix()]
@@ -436,7 +534,7 @@ SUBTASK_TOOL_MAP: dict[str, str] = {
 }
 
 
-def ground_to_tools(plan: Plan, tools: list[dict] | None) -> list[GroundedAction]:
+def ground_to_tools(plan: Plan, tools: list[dict[str, Any]] | None) -> list[GroundedAction]:
     """将子任务映射为具名工具；tools 为可选目录（用于校验/遥测）。"""
     allowed = {t.get("name") for t in (tools or []) if t.get("name")}
     grounded: list[GroundedAction] = []
@@ -490,7 +588,7 @@ class IntentSystem:
             max_retries=1,
         )
 
-    async def _llm_json(self, system: str, user: str) -> tuple[dict, str]:
+    async def _llm_json(self, system: str, user: str) -> tuple[dict[str, Any], str]:
         model = _gate_model()
         base_url = _gate_base_url()
         # Use gate-specific client if base_url differs from main LLM
@@ -588,8 +686,8 @@ class IntentSystem:
         *,
         document: str = "",
         state: AgentRuntimeState,
-        tools: list[dict] | None = None,
-        chat_history: list[dict] | None = None,
+        tools: list[dict[str, Any]] | None = None,
+        chat_history: list[dict[str, Any]] | None = None,
         hooks: IntentHooks | None = None,
     ) -> IntentCycleResult:
         cid = short_id(getattr(state, "chat_id", "") or "", 12)
