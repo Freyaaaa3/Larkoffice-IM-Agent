@@ -1,0 +1,37 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python3 -c ' *)",
+      "Bash(python -c ' *)",
+      "Bash(pip install *)",
+      "WebFetch(domain:open.feishu.cn)",
+      "Bash(curl -sL \"https://open.feishu.cn/document/no_class/mcp-archive/feishu-cli-installation-guide.md\" --max-time 15)",
+      "Bash(npx *)",
+      "Bash(lark-cli im *)",
+      "Bash(lark-cli auth *)",
+      "Bash(lark-cli --help)",
+      "Bash(awk '{print $1}')",
+      "Bash(lark-cli slides *)",
+      "Bash(lark-cli whiteboard *)",
+      "Bash(lark-cli mail *)",
+      "Bash(npm install *)",
+      "Bash(lark *)",
+      "Bash(lark-cli *)",
+      "Bash(curl -s http://localhost:3002/health)",
+      "Bash(node *)",
+      "Bash(netstat -ano)",
+      "Bash(where lark-cli.cmd)",
+      "Read(//d/nodereps/npm_global/**)",
+      "Bash(npm run *)",
+      "Bash(taskkill *)",
+      "Bash(curl -s http://localhost:3002/m)",
+      "Bash(curl -s -o /dev/null -w \"%{http_code}\" http://localhost:3002/m)",
+      "Bash(curl -s -o /dev/null -w \"%{http_code}\" http://localhost:3002/api/plans)",
+      "WebFetch(domain:github.com)",
+      "WebSearch",
+      "Bash(pip list *)",
+      "Bash(curl -s http://localhost:11434/api/chat -H \"Content-Type: application/json\" -d '{\"model\":\"qwen2.5:3b\",\"messages\":[{\"role\":\"system\",\"content\":\"你是消息有用性筛选器。判断用户对话文本对AI助手落地任务是否有信息价值。只输出JSON。useful_score: 0.0=无用, 1.0=非常有用。\"},{\"role\":\"user\",\"content\":\"对话文本：帮我把今天讨论的产品功能规划整理成一份汇报PPT。只输出JSON。\"}],\"stream\":false,\"format\":\"json\"}')",
+      "Bash(python -c \"import sys,json; d=json.loads\\(sys.stdin.read\\(\\)\\); print\\(d['message']['content']\\)\")"
+    ]
+  }
+}

@@ -239,12 +239,18 @@ class FeishuBot:
             if not text.strip():
                 F("im.filter", "跳过", reason="empty_after_mention", chat_type=chat_type or "")
                 if chat_type == "group" and self._client:
-                    asyncio.create_task(
-                        self.send_text(
-                            chat_id,
-                            "我在，请直接说明需求，例如：「做一份季度汇报 PPT，10 页左右」。",
+                    from agent.card_templates import get_welcome_card
+
+                    card = get_welcome_card()
+                    if card:
+                        asyncio.create_task(self.send_card(chat_id, card))
+                    else:
+                        asyncio.create_task(
+                            self.send_text(
+                                chat_id,
+                                "我在，请直接说明需求，例如：「做一份季度汇报 PPT，10 页左右」。",
+                            )
                         )
-                    )
                 return
 
             if not self._handler:
@@ -433,4 +439,48 @@ class FeishuBot:
             return True
         except Exception:
             logger.exception("Error sending post message")
+            return False
+
+    async def send_card(self, chat_id: str, card_json: dict, reply_to: str = "") -> bool:
+        """Send an interactive card message."""
+        if not self._client:
+            return False
+
+        body_json = json.dumps(card_json)
+
+        try:
+            if reply_to:
+                req = (
+                    ReplyMessageRequest.builder()
+                    .message_id(reply_to)
+                    .request_body(
+                        ReplyMessageRequestBody.builder()
+                        .msg_type("interactive")
+                        .content(body_json)
+                        .build()
+                    )
+                    .build()
+                )
+                resp = await asyncio.to_thread(self._client.im.v1.message.reply, req)
+            else:
+                req = (
+                    CreateMessageRequest.builder()
+                    .receive_id_type("chat_id")
+                    .request_body(
+                        CreateMessageRequestBody.builder()
+                        .msg_type("interactive")
+                        .content(body_json)
+                        .receive_id(chat_id)
+                        .build()
+                    )
+                    .build()
+                )
+                resp = await asyncio.to_thread(self._client.im.v1.message.create, req)
+
+            if not resp.success():
+                logger.error("Send card failed: code=%s msg=%s", resp.code, resp.msg)
+                return False
+            return True
+        except Exception:
+            logger.exception("Error sending card message")
             return False
